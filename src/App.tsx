@@ -4,6 +4,7 @@ import {
   CircleDollarSign,
   Clock3,
   Gavel,
+  PackageOpen,
   RefreshCw,
   Search,
   Settings2,
@@ -18,8 +19,77 @@ import type { ScannerCard } from "./types";
 import "./App.css";
 
 const priceCacheKey = "wikimasters-card-prices-v2";
+const collectionCacheKey = "wikimasters-collection-cache-v3";
+const marketplaceCacheKey = "wikimasters-marketplace-snapshot-v1";
 const marketplaceRefreshSeconds = 15;
 type PricePoint = { price: number; at: string };
+
+function readMarketplaceCache() {
+  try {
+    return JSON.parse(localStorage.getItem(marketplaceCacheKey) || "null") as {
+      snapshot?: {
+        auctions?: Partial<ScannerCard>[];
+        bidding?: Partial<ScannerCard>[];
+        won?: Partial<ScannerCard>[];
+        marketplaceOpportunities?: Partial<ScannerCard>[];
+      };
+      fetchedAt?: string;
+    } | null;
+  } catch {
+    return null;
+  }
+}
+
+function writeMarketplaceCache(snapshot: {
+  auctions?: Partial<ScannerCard>[];
+  bidding?: Partial<ScannerCard>[];
+  won?: Partial<ScannerCard>[];
+  marketplaceOpportunities?: Partial<ScannerCard>[];
+}) {
+  try {
+    localStorage.setItem(
+      marketplaceCacheKey,
+      JSON.stringify({ snapshot, fetchedAt: new Date().toISOString() }),
+    );
+  } catch {
+    // Keep the live polling usable when local storage is unavailable.
+  }
+}
+
+function readExtensionCollectionCache(): Promise<{
+  fetchedAt?: number;
+  items?: unknown[];
+  cards?: Partial<ScannerCard>[];
+} | null> {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get([collectionCacheKey], (values) => {
+        const cached = values?.[collectionCacheKey];
+        resolve(cached && Array.isArray(cached.items) ? cached : null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function normalizeCachedCollectionItems(items: unknown[]): Partial<ScannerCard>[] {
+  return items.map((item, index) => {
+    const value = item as Record<string, unknown>;
+    const cardId = value.card_id ?? value.cardId ?? value.id;
+    return {
+      id: cardId ? String(cardId) : `cached-${index}`,
+      cardId: cardId ? String(cardId) : undefined,
+      name: String(value.name ?? value.title ?? value.cardName ?? "Carte WikiMasters"),
+      set: String(value.set ?? value.setName ?? value.extension ?? "Set inconnu"),
+      number: String(value.number ?? value.cardNumber ?? value.card_number ?? "—"),
+      rarity: String(value.rarity ?? value.rarityName ?? "Inconnue"),
+      quantity: Number(value.quantity ?? value.count ?? 1),
+      imageUrl: typeof value.imageUrl === "string" ? value.imageUrl : undefined,
+      qScore: typeof value.qScore === "number" ? value.qScore : undefined,
+    };
+  });
+}
 
 function mapCollectionCards(cards: Partial<ScannerCard>[]): ScannerCard[] {
   return cards.map((card, index) => ({
@@ -77,6 +147,18 @@ function readCachedTrend(cardId: string) {
     : 0;
 }
 
+function formatPricePointDate(value: string) {
+  if (!value) return "Date inconnue";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "Date inconnue"
+    : date.toLocaleDateString("fr-FR", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+      });
+}
+
 function writeCachedPrice(cardId: string, marketPrice: number) {
   try {
     const cache = JSON.parse(
@@ -84,8 +166,14 @@ function writeCachedPrice(cardId: string, marketPrice: number) {
     ) as Record<string, number | PricePoint[]>;
     const history = readPriceHistory(cardId);
     const last = history.at(-1);
-    if (!last || last.price !== marketPrice)
+    if (!last || last.price !== marketPrice) {
       history.push({ price: marketPrice, at: new Date().toISOString() });
+    } else {
+      history[history.length - 1] = {
+        ...last,
+        at: new Date().toISOString(),
+      };
+    }
     localStorage.setItem(
       priceCacheKey,
       JSON.stringify({ ...cache, [cardId]: history.slice(-30) }),
@@ -224,12 +312,16 @@ function App() {
     return () => chrome.runtime.onMessage.removeListener(handleAuthStatus);
   }, []);
 
-  const applyMarketplaceSnapshot = (snapshot: {
+  const applyMarketplaceSnapshot = (
+    snapshot: {
     auctions?: Partial<ScannerCard>[];
     bidding?: Partial<ScannerCard>[];
     won?: Partial<ScannerCard>[];
     marketplaceOpportunities?: Partial<ScannerCard>[];
-  }) => {
+    },
+    persist = true,
+  ) => {
+    if (persist) writeMarketplaceCache(snapshot);
     const sales = (snapshot.auctions || []).map(
       (auction, index): ScannerCard => ({
         id: auction.id || `auction-${index}`,
@@ -422,26 +514,50 @@ function App() {
       .finally(() => setIsLoadingMarketplace(false));
   };
 
+  const refreshCollection = () => {
+    setSyncError(null);
+    setDataSource("loading");
+    setRefreshToken((token) => token + 1);
+  };
+
   useEffect(() => {
     setIsLoadingCollection(true);
-    chrome.runtime
-      .sendMessage({ type: "LOAD_COLLECTION_CACHE" })
-      .then((response) => {
-        if (!response?.ok || !response.snapshot?.cards?.length) return;
-        const cachedCards = mapCollectionCards(response.snapshot.cards);
-        setCards((currentCards) => [
-          ...cachedCards,
-          ...currentCards.filter((card) => card.owned !== true),
-        ]);
-        setDataSource("local-cache");
-        addLog(`${cachedCards.length} cartes chargées depuis le cache local`);
-      })
-      .catch(() => undefined);
-
+    addLog("Recherche du cache de la collection dans l’extension");
+    readExtensionCollectionCache().then((cachedCollection) => {
+      if (!cachedCollection) {
+        addLog("Aucun cache de collection disponible dans l’extension");
+        return;
+      }
+      const cachedItems = cachedCollection.cards || normalizeCachedCollectionItems(cachedCollection.items || []);
+      const cachedCards = mapCollectionCards(cachedItems);
+      if (!cachedCards.length) {
+        addLog("Cache de collection vide dans l’extension");
+        return;
+      }
+      setCards((currentCards) => [
+        ...cachedCards,
+        ...currentCards.filter((card) => card.owned !== true),
+      ]);
+      setDataSource("local-cache");
+      addLog(`${cachedCards.length} cartes chargées depuis le cache de l’extension`);
+    });
+    addLog("Recherche du cache des ventes et achats");
+    const cachedMarketplace = readMarketplaceCache();
+    if (cachedMarketplace?.snapshot) {
+      applyMarketplaceSnapshot(cachedMarketplace.snapshot, false);
+      addLog(
+        `Cache ventes/achats chargé${cachedMarketplace.fetchedAt ? ` (${new Date(cachedMarketplace.fetchedAt).toLocaleTimeString("fr-FR")})` : ""}`,
+      );
+    } else {
+      addLog("Aucun cache ventes/achats disponible");
+    }
     refreshSales();
 
     chrome.runtime
-      .sendMessage({ type: "ANALYZE_WIKIMASTERS_API" })
+      .sendMessage({
+        type: "ANALYZE_WIKIMASTERS_API",
+        payload: { forceRefresh: refreshToken > 0 },
+      })
       .then((response) => {
         addLog(
           response?.ok
@@ -576,7 +692,11 @@ function App() {
         });
         setSummaryValue(response.snapshot.summary?.estimatedValue ?? null);
         setSummaryGain(response.snapshot.summary?.potentialGain ?? null);
-        setDataSource("wikimasters-api");
+        setDataSource(
+          response.snapshot.source === "local-cache"
+            ? "local-cache"
+            : "wikimasters-api",
+        );
         setSyncError(null);
         addLog("Collection affichée ; chargement des prix en arrière-plan");
       })
@@ -749,6 +869,9 @@ function App() {
     );
   const visibleCards =
     activeTab === "opportunities" ? opportunityCards : collectionCards;
+  const selectedPriceHistory = selectedCard?.cardId
+    ? readPriceHistory(selectedCard.cardId)
+    : [];
   const openMarket = (card: ScannerCard) => {
     const params = new URLSearchParams({
       page: "1",
@@ -781,6 +904,15 @@ function App() {
             onClick={refreshSales}
           >
             <RefreshCw size={17} />
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="Recharger toute la collection"
+            title="Recharger toute la collection"
+            onClick={refreshCollection}
+          >
+            <PackageOpen size={17} />
           </button>
           <button
             className={`icon-button ${logsVisible ? "icon-button-active" : ""}`}
@@ -1136,7 +1268,30 @@ function App() {
                 {selectedCard.marketPrice.toFixed(2).replace(".", ",")}{" "}
                 Wikibidous
               </strong>
-              <small>+{selectedCard.trend}% sur 30 jours</small>
+              <small>
+                {selectedCard.priceLoading && (
+                  <span className="inline-loader" aria-hidden="true" />
+                )}
+                +{selectedCard.trend}% sur 30 jours
+              </small>
+            </div>
+            <div className="price-history">
+              <div className="price-history-heading">
+                <span>Historique des prix</span>
+                <small>30 derniers relevés en cache</small>
+              </div>
+              {selectedPriceHistory.length ? (
+                <div className="price-history-list">
+                  {[...selectedPriceHistory].reverse().map((point, index) => (
+                    <div className="price-history-row" key={`${point.at}-${index}`}>
+                      <span>{formatPricePointDate(point.at)}</span>
+                      <strong>{point.price.toFixed(2).replace(".", ",")} Wikibidous</strong>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="price-history-empty">Aucun relevé en cache.</p>
+              )}
             </div>
             <div className="detail-stats">
               <div>

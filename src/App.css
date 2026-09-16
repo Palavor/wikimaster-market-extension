@@ -838,6 +838,57 @@ h1 {
     color: var(--mint);
 }
 
+.price-history {
+    margin-top: 18px;
+    padding-top: 15px;
+    border-top: 1px solid var(--line);
+}
+
+.price-history-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+    color: var(--ink);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.price-history-heading small {
+    color: var(--muted);
+    font: 9px 'DM Mono', monospace;
+    font-weight: 400;
+}
+
+.price-history-list {
+    display: grid;
+    gap: 5px;
+    max-height: 170px;
+    overflow-y: auto;
+}
+
+.price-history-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 0;
+    color: var(--muted);
+    border-bottom: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+    font: 10px 'DM Mono', monospace;
+}
+
+.price-history-row strong {
+    color: var(--ink);
+    font-weight: 600;
+}
+
+.price-history-empty {
+    margin: 0;
+    color: var(--muted);
+    font-size: 11px;
+}
+
 .detail-stats {
     display: grid;
     grid-template-columns:1fr 1fr;

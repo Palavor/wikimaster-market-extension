@@ -13,6 +13,40 @@ const apiBase = 'https://www.wiki-masters.com';
 const collectionCacheKey = 'wikimasters-collection-cache-v3';
 const biddingPriceCacheKey = 'wikimasters-bidding-prices-v1';
 
+function readExtensionStorage(key) {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get([key], (values) => resolve(values?.[key]));
+    } catch {
+      resolve(undefined);
+    }
+  });
+}
+
+function writeExtensionStorage(key, value) {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.set({ [key]: value }, resolve);
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function readCachedJson(key) {
+  const extensionValue = await readExtensionStorage(key);
+  if (extensionValue !== undefined) return extensionValue;
+  try {
+    const legacyValue = JSON.parse(localStorage.getItem(key) || 'null');
+    if (legacyValue === null) return undefined;
+    await writeExtensionStorage(key, legacyValue);
+    localStorage.removeItem(key);
+    return legacyValue;
+  } catch {
+    return undefined;
+  }
+}
+
 function isCollectionPage() {
   return window.location.pathname.toLowerCase().startsWith('/collection');
 }
@@ -145,25 +179,17 @@ async function fetchAllCollectionPages(diagnostics) {
     if (!items.length || !newItems.length || (total > 0 && pages.length >= total) || items.length < pageSize) break;
   }
 
-  try {
-    localStorage.setItem(collectionCacheKey, JSON.stringify({ fetchedAt: Date.now(), items: pages }));
-  } catch {
-    // Continue normally when storage is full or unavailable.
-  }
+  await writeExtensionStorage(collectionCacheKey, { fetchedAt: Date.now(), items: pages });
   return pages;
 }
 
-function readCollectionCache() {
-  try {
-    const cached = JSON.parse(localStorage.getItem(collectionCacheKey) || 'null');
-    return Array.isArray(cached?.items) ? cached : undefined;
-  } catch {
-    return undefined;
-  }
+async function readCollectionCache() {
+  const cached = await readCachedJson(collectionCacheKey);
+  return Array.isArray(cached?.items) ? cached : undefined;
 }
 
-function analyzeCollectionFromCache() {
-  const cached = readCollectionCache();
+async function analyzeCollectionFromCache() {
+  const cached = await readCollectionCache();
   if (!cached) return undefined;
   const diagnostics = [`Cache collection chargé (${cached.items.length} cartes)`];
   return {
@@ -246,36 +272,27 @@ async function enrichAuctionsWithBids(auctions, diagnostics) {
 async function fetchAverageCardPrice(name, rarity, diagnostics) {
   if (!name) return { cardId: undefined, marketPrice: 0 };
   const lookupKey = `${name.trim().toLowerCase()}|${String(rarity || '').trim().toLowerCase()}`;
-  let cache = {};
-  try {
-    cache = JSON.parse(localStorage.getItem(biddingPriceCacheKey) || '{}');
-    const cached = cache[lookupKey];
-    if (cached && Number.isFinite(Number(cached.marketPrice))) return cached;
-  } catch {
-    // Continue with the API when the cache is unavailable.
-  }
+  const cache = (await readCachedJson(biddingPriceCacheKey)) || {};
+  const cached = cache[lookupKey];
+  if (cached && Number.isFinite(Number(cached.marketPrice))) return cached;
   const cards = await fetchJson(`/api/cards?page=0&q=${encodeURIComponent(name)}&sort=rarity`, diagnostics);
   const match = normalizeApiCards(cards).find((card) => !rarity || card.rarity?.toLowerCase() === String(rarity).toLowerCase()) || normalizeApiCards(cards)[0];
   if (!match?.cardId) return { cardId: undefined, marketPrice: 0 };
   const sales = await fetchJson(`/api/marketplace/cards/${encodeURIComponent(match.cardId)}/sales?scope=summary`, diagnostics);
   const marketPrice = priceFromSalesSummary(sales, rarity || match.rarity);
-  try {
-    const result = { cardId: match.cardId, marketPrice };
-    localStorage.setItem(biddingPriceCacheKey, JSON.stringify({ ...cache, [lookupKey]: result }));
-  } catch {
-    // Continue normally when storage is unavailable.
-  }
+  const result = { cardId: match.cardId, marketPrice };
+  await writeExtensionStorage(biddingPriceCacheKey, { ...cache, [lookupKey]: result });
   return { cardId: match.cardId, marketPrice };
 }
 
-function viewerIdFromMarketplace(payload) {
+async function viewerIdFromMarketplace(payload) {
   const cacheKey = 'wikimasters-viewer-id-v1';
   const candidate = valueFrom(payload, ['viewer_id', 'viewerId', 'current_user_id', 'currentUserId', 'user_id', 'userId']) ?? payload?.selling?.[0]?.seller_id;
   if (candidate) {
-    try { localStorage.setItem(cacheKey, String(candidate)); } catch { /* Ignore unavailable storage. */ }
+    await writeExtensionStorage(cacheKey, String(candidate));
     return String(candidate);
   }
-  try { return localStorage.getItem(cacheKey) || undefined; } catch { return undefined; }
+  return (await readExtensionStorage(cacheKey)) || undefined;
 }
 
 function markOutbid(auctions, viewerId) {
@@ -303,7 +320,11 @@ function priceFromSalesSummary(payload, rarity) {
   return sales.length ? sales[0] : 0;
 }
 
-async function analyzeCollectionFromApi() {
+async function analyzeCollectionFromApi(forceRefresh = false) {
+  if (!forceRefresh) {
+    const cachedSnapshot = await analyzeCollectionFromCache();
+    if (cachedSnapshot) return cachedSnapshot;
+  }
   const diagnostics = [`Page active : ${window.location.href}`];
   let results;
   try {
@@ -311,7 +332,7 @@ async function analyzeCollectionFromApi() {
       fetchAllCollectionPages(diagnostics),
       fetchJson('/api/my-collection/stats?sort=rarity', diagnostics),
     ]);
-  } catch {
+  } catch (error) {
     error.diagnostics = diagnostics;
     throw error;
   }
@@ -368,7 +389,7 @@ async function analyzeSalesFromApi() {
   }));
   return {
     auctions: enrichedSelling.map((auction) => ({ ...auction, owned: true })),
-    bidding: markOutbid(enrichedBidding, viewerIdFromMarketplace(marketplace)).map((auction) => ({ ...auction, status: 'bidding', owned: false, bidding: true })),
+    bidding: markOutbid(enrichedBidding, await viewerIdFromMarketplace(marketplace)).map((auction) => ({ ...auction, status: 'bidding', owned: false, bidding: true })),
     won: won.map((auction) => ({ ...auction, owned: true, listing: false, status: 'won' })),
     marketplaceOpportunities: [],
     diagnostics,
@@ -438,12 +459,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === 'ANALYZE_WIKIMASTERS_API') {
-    analyzeCollectionFromApi().then((snapshot) => sendResponse({ ok: true, snapshot })).catch((error) => sendResponse({ ok: false, error: error.message, diagnostics: error.diagnostics || [] }));
+    analyzeCollectionFromApi(Boolean(message.payload?.forceRefresh)).then((snapshot) => sendResponse({ ok: true, snapshot })).catch((error) => sendResponse({ ok: false, error: error.message, diagnostics: error.diagnostics || [] }));
     return true;
   }
   if (message?.type === 'LOAD_COLLECTION_CACHE') {
-    const snapshot = analyzeCollectionFromCache();
-    sendResponse(snapshot ? { ok: true, snapshot } : { ok: false, error: 'Cache collection vide' });
+    analyzeCollectionFromCache().then((snapshot) => {
+      sendResponse(snapshot ? { ok: true, snapshot } : { ok: false, error: 'Cache collection vide' });
+    });
+    return true;
   }
 });
 

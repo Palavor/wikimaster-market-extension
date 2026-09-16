@@ -32,7 +32,7 @@ export function CardRow({card, onSelect}: { card: ScannerCard; onSelect: (card: 
     return (
         <button className="card-row" onClick={() => {
             const cachedPrice = readCachedPrice(card.cardId);
-            onSelect({...card, marketPrice: cachedPrice ?? card.marketPrice, priceLoading: cachedPrice === undefined})
+            onSelect({...card, marketPrice: cachedPrice ?? card.marketPrice, priceLoading: true})
         }} type="button">
             <div className="card-thumb">{card.imageUrl ? <img src={card.imageUrl} alt=""/> :
                 <PackageOpen size={18}/>}</div>

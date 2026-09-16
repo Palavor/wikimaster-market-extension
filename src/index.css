@@ -1,0 +1,13 @@
+html {
+	background: #f7faf7;
+}
+
+body {
+	margin: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+	html {
+		background: #101714;
+	}
+}

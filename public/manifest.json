@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "WikiMasters Market Scanner",
+  "version": "0.1.1",
+  "description": "Analysez votre collection WikiMasters et reperez les cartes qui valent la peine d'etre vendues.",
+  "permissions": ["storage", "sidePanel", "activeTab", "scripting", "tabs"],
+  "host_permissions": ["https://www.wiki-masters.com/*"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.wiki-masters.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Ouvrir Market Scanner"
+  },
+  "side_panel": {
+    "default_path": "index.html"
+  }
+}

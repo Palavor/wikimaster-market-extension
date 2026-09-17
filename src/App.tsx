@@ -64,7 +64,9 @@ function readExtensionCollectionCache(): Promise<{
   return new Promise((resolve) => {
     try {
       chrome.storage.local.get([collectionCacheKey], (values) => {
-        const cached = values?.[collectionCacheKey];
+        const cached = values?.[collectionCacheKey] as
+          | { fetchedAt?: number; items?: unknown[]; cards?: Partial<ScannerCard>[] }
+          | undefined;
         resolve(cached && Array.isArray(cached.items) ? cached : null);
       });
     } catch {
